@@ -363,10 +363,13 @@ export default function Home() {
       totalAreaSqft: roofAreas.reduce((sum, area) => sum + area.sqft, 0),
       ...formValues,
     };
+  
     // eslint-disable-next-line no-console
     console.log("Submission:", payload);
+  
     alert("Submitted! Check console for payload.");
   };
+  
 
   const addCurrentRoofArea = () => {
     if (!address || areaInfo.sqm <= 0 || addressError || !currentPolygon) return;
