@@ -364,9 +364,6 @@ export default function Home() {
       ...formValues,
     };
   
-    // eslint-disable-next-line no-console
-    console.log("Submission:", payload);
-  
     alert("Submitted! Check console for payload.");
   };
   
@@ -427,7 +424,7 @@ export default function Home() {
               </div>
               <div className="instruction-step">
                 <span className="step-number">2</span>
-                <span>Click "Draw new roof shape" button</span>
+                <span>Click &quot;Draw new roof shape&quot; button 2</span>
               </div>
               <div className="instruction-step">
                 <span className="step-number">3</span>
