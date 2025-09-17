@@ -30,6 +30,8 @@ export default function Home() {
   const [highlightedPolygons, setHighlightedPolygons] = useState([]); // Store polygon data for highlighting
   const [currentPolygon, setCurrentPolygon] = useState(null); // Store current polygon geometry
   const [isDrawingMode, setIsDrawingMode] = useState(false); // Track if user is in drawing mode
+  const [isDetectingRoofs, setIsDetectingRoofs] = useState(false); // Track automatic roof detection
+  const [detectedRoofs, setDetectedRoofs] = useState([]); // Store automatically detected roof areas
 
   useEffect(() => {
     if (!mapContainerRef.current) {
@@ -73,7 +75,7 @@ export default function Home() {
       types: "address,poi", // Only addresses and points of interest
     });
     geocoderRef.current = geocoder;
-    map.addControl(geocoder, "top-left");
+    // Don't add to map controls, we'll add it to our custom container
 
     const draw = new MapboxDraw({
       displayControlsDefault: false,
@@ -181,7 +183,7 @@ export default function Home() {
     geocoder.on("result", (ev) => {
       if (!ev || !ev.result || !ev.result.center) return;
       const [lon, lat] = ev.result.center;
-      map.flyTo({ center: [lon, lat], zoom: 16 });
+      map.flyTo({ center: [lon, lat], zoom: 18 });
       if (ev.result.place_name) {
         // Check if the result is from USA
         const isUSA = ev.result.context && ev.result.context.some(ctx => 
@@ -191,10 +193,65 @@ export default function Home() {
         if (isUSA) {
           setAddress(ev.result.place_name);
           setAddressError("");
+          // Clear existing roof areas and detected roofs
+          setRoofAreas([]);
+          setHighlightedPolygons([]);
+          setDetectedRoofs([]);
+          // Trigger automatic roof detection
+          setTimeout(() => {
+            detectRoofAreas([lon, lat]);
+          }, 1000); // Wait for map to settle
         } else {
           setAddressError("Please select an address in the United States only.");
           setAddress("");
         }
+      }
+    });
+
+    // Add geocoder to form search container after map loads
+    map.on("load", () => {
+      addBuildingOutlines();
+      
+      // Add geocoder to form search container
+      const formSearchContainer = document.getElementById('form-search-container');
+      if (formSearchContainer) {
+        // Create a geocoder instance for the form
+        const formGeocoder = new MapboxGeocoder({
+          accessToken: mapboxgl.accessToken,
+          mapboxgl: mapboxgl,
+          marker: false,
+          placeholder: "Search address in USA",
+          countries: "us",
+          types: "address,poi",
+        });
+        
+        // Add the same event handler
+        formGeocoder.on("result", (ev) => {
+          if (!ev || !ev.result || !ev.result.center) return;
+          const [lon, lat] = ev.result.center;
+          map.flyTo({ center: [lon, lat], zoom: 18 });
+          if (ev.result.place_name) {
+            const isUSA = ev.result.context && ev.result.context.some(ctx => 
+              ctx.id && ctx.id.startsWith('country') && ctx.short_code === 'us'
+            );
+            
+            if (isUSA) {
+              setAddress(ev.result.place_name);
+              setAddressError("");
+              setRoofAreas([]);
+              setHighlightedPolygons([]);
+              setDetectedRoofs([]);
+              setTimeout(() => {
+                detectRoofAreas([lon, lat]);
+              }, 1000);
+            } else {
+              setAddressError("Please select an address in the United States only.");
+              setAddress("");
+            }
+          }
+        });
+        
+        formSearchContainer.appendChild(formGeocoder.onAdd(map));
       }
     });
 
@@ -288,21 +345,363 @@ export default function Home() {
     if (!mapRef.current) return;
     const map = mapRef.current;
     
-    // Add building layer if it doesn't exist
-    if (!map.getLayer('building-outlines')) {
-      map.addLayer({
-        id: 'building-outlines',
-        type: 'line',
-        source: 'composite',
-        'source-layer': 'building',
-        filter: ['==', 'extrude', 'true'],
-        paint: {
-          'line-color': '#ff6b6b',
-          'line-width': 2,
-          'line-opacity': 0.6
+    try {
+      // Check if the building source layer exists in the composite source
+      const sources = map.getStyle().sources;
+      const compositeSource = sources['composite'];
+      
+      if (compositeSource && compositeSource.type === 'vector') {
+        // Check if building source layer exists
+        const hasBuildingLayer = compositeSource.tiles && 
+          compositeSource.tiles.some(tile => tile.includes('building'));
+        
+        if (hasBuildingLayer) {
+          // Add building layer if it doesn't exist
+          if (!map.getLayer('building-outlines')) {
+            map.addLayer({
+              id: 'building-outlines',
+              type: 'line',
+              source: 'composite',
+              'source-layer': 'building',
+              filter: ['==', 'extrude', 'true'],
+              paint: {
+                'line-color': '#ff6b6b',
+                'line-width': 3,
+                'line-opacity': 0.8
+              }
+            });
+          }
+          
+          // Also add a building fill layer for better visibility
+          if (!map.getLayer('building-fill')) {
+            map.addLayer({
+              id: 'building-fill',
+              type: 'fill',
+              source: 'composite',
+              'source-layer': 'building',
+              filter: ['==', 'extrude', 'true'],
+              paint: {
+                'fill-color': '#ff6b6b',
+                'fill-opacity': 0.1
+              }
+            });
+          }
+        } else {
+          console.log('Building source layer not available in composite source');
         }
-      });
+      } else {
+        console.log('Composite source not available or not a vector source');
+      }
+    } catch (error) {
+      console.log('Error adding building outlines:', error);
     }
+  };
+
+  // Function to automatically detect roof areas from building data
+  const detectRoofAreas = async (center, zoom = 18, retryCount = 0) => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+    
+    setIsDetectingRoofs(true);
+    setDetectedRoofs([]);
+    
+    try {
+      // Wait for the map to fully load and render
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Get the current map bounds to search within the visible area
+      const bounds = map.getBounds();
+      const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+      
+      // Try multiple approaches to get building data
+      let features = [];
+      
+      // Method 1: Query all rendered features in the visible area
+      try {
+        const allFeatures = await map.queryRenderedFeatures({
+          bbox: bbox
+        });
+        
+        console.log('All rendered features:', allFeatures.length);
+        
+        // Filter for building-related features with more comprehensive criteria
+        features = allFeatures.filter(feature => {
+          const layerId = feature.layer?.id || '';
+          const sourceLayer = feature.sourceLayer || '';
+          const properties = feature.properties || {};
+          
+          // Check layer names
+          const isBuildingLayer = layerId.includes('building') || 
+                                 sourceLayer.includes('building') ||
+                                 layerId.includes('structure') ||
+                                 layerId.includes('outline');
+          
+          // Check properties
+          const isBuildingProperty = properties.type === 'building' ||
+                                   properties.building ||
+                                   properties.structure ||
+                                   properties.extrude ||
+                                   properties.height ||
+                                   properties.levels;
+          
+          // Check geometry type (polygons are buildings)
+          const isPolygon = feature.geometry && feature.geometry.type === 'Polygon';
+          
+          return (isBuildingLayer || isBuildingProperty) && isPolygon;
+        });
+        
+        console.log('Found building features:', features.length);
+        
+        // Log details about found features for debugging
+        features.forEach((feature, index) => {
+          console.log(`Feature ${index}:`, {
+            layerId: feature.layer?.id,
+            sourceLayer: feature.sourceLayer,
+            properties: feature.properties,
+            geometry: feature.geometry?.type
+          });
+        });
+      } catch (e) {
+        console.log('Method 1 failed:', e);
+      }
+      
+      // Method 2: Try specific building layers - first check what layers exist
+      if (features.length === 0) {
+        // Get all available layers from the map style
+        const allLayers = map.getStyle().layers;
+        const availableLayerIds = allLayers.map(layer => layer.id);
+        console.log('Available layers:', availableLayerIds);
+        
+        // Find building-related layers that actually exist
+        const buildingLayers = availableLayerIds.filter(layerId => 
+          layerId.includes('building') || 
+          layerId.includes('structure') ||
+          layerId.includes('outline')
+        );
+        
+        console.log('Found building-related layers:', buildingLayers);
+        
+        // Try each existing building layer
+        for (const layer of buildingLayers) {
+          try {
+            const layerFeatures = await map.queryRenderedFeatures({
+              layers: [layer],
+              bbox: bbox
+            });
+            if (layerFeatures.length > 0) {
+              features = layerFeatures.filter(f => f.geometry && f.geometry.type === 'Polygon');
+              console.log(`Found features in layer ${layer}:`, features.length);
+              if (features.length > 0) break;
+            }
+          } catch (e) {
+            console.log(`Layer ${layer} failed:`, e);
+          }
+        }
+      }
+      
+      // Method 3: Query source features with different filters
+      if (features.length === 0) {
+        try {
+          // First check what source layers are available
+          const sources = map.getStyle().sources;
+          const compositeSource = sources['composite'];
+          
+          if (compositeSource && compositeSource.type === 'vector') {
+            console.log('Composite source available, checking for building data...');
+            
+            // Try different source layer names and filters
+            const sourceQueries = [
+              { sourceLayer: 'building', filter: ['==', 'extrude', 'true'] },
+              { sourceLayer: 'building', filter: ['>', 'height', 0] },
+              { sourceLayer: 'building', filter: ['>', 'levels', 0] },
+              { sourceLayer: 'building', filter: ['has', 'type'] },
+              { sourceLayer: 'building', filter: null }, // No filter
+              { sourceLayer: 'structure', filter: null },
+              { sourceLayer: 'buildings', filter: null }
+            ];
+            
+            for (const query of sourceQueries) {
+              try {
+                const sourceFeatures = await map.querySourceFeatures('composite', query);
+                if (sourceFeatures.length > 0) {
+                  features = sourceFeatures.filter(f => f.geometry && f.geometry.type === 'Polygon');
+                  console.log(`Found source features with sourceLayer '${query.sourceLayer}' and filter ${JSON.stringify(query.filter)}:`, features.length);
+                  if (features.length > 0) break;
+                }
+              } catch (e) {
+                console.log(`Source query failed for ${query.sourceLayer}:`, e.message);
+              }
+            }
+          } else {
+            console.log('Composite source not available or not a vector source');
+          }
+        } catch (e) {
+          console.log('Source features failed:', e);
+        }
+      }
+      
+      
+      if (features && features.length > 0) {
+        // Process the found features
+        const roofAreas = processBuildingFeatures(features, center);
+        if (roofAreas.length > 0) {
+          setDetectedRoofs(roofAreas);
+        } else {
+          // If no valid buildings found, create sample roof areas
+          const sampleRoofs = createSampleRoofAreas(center);
+          setDetectedRoofs(sampleRoofs);
+        }
+      } else {
+        // No building data found, create sample roof areas
+        console.log('No building features found, creating sample roof areas');
+        const sampleRoofs = createSampleRoofAreas(center);
+        setDetectedRoofs(sampleRoofs);
+      }
+    } catch (error) {
+      console.error('Error detecting roof areas:', error);
+      // Fallback: create sample roof areas based on typical building patterns
+      const sampleRoofs = createSampleRoofAreas(center);
+      setDetectedRoofs(sampleRoofs);
+    } finally {
+      setIsDetectingRoofs(false);
+    }
+  };
+
+  // Process building features and convert to roof areas
+  const processBuildingFeatures = (features, center) => {
+    const roofAreas = [];
+    
+    // Filter for valid polygon features and calculate their properties
+    const validFeatures = features
+      .filter(feature => {
+        // Must be a polygon
+        if (!feature.geometry || feature.geometry.type !== 'Polygon') return false;
+        
+        // Must have valid coordinates
+        const coords = feature.geometry.coordinates[0];
+        if (!coords || coords.length < 3) return false;
+        
+        return true;
+      })
+      .map(feature => {
+        const area = turf.area(feature);
+        const centroid = turf.centroid(feature);
+        const distanceFromCenter = turf.distance(center, centroid, { units: 'kilometers' });
+        
+        return { 
+          ...feature, 
+          area, 
+          centroid: centroid.geometry.coordinates,
+          distanceFromCenter 
+        };
+      })
+      .filter(feature => {
+        // Filter by reasonable size and distance
+        return feature.area >= 5 && feature.area <= 10000 && feature.distanceFromCenter <= 0.5;
+      })
+      .sort((a, b) => {
+        // Sort by distance from center first, then by area
+        if (Math.abs(a.distanceFromCenter - b.distanceFromCenter) < 0.1) {
+          return b.area - a.area; // Larger area first if similar distance
+        }
+        return a.distanceFromCenter - b.distanceFromCenter; // Closer first
+      })
+      .slice(0, 3); // Take top 3 buildings
+    
+    validFeatures.forEach((feature, index) => {
+      const area = feature.area;
+      const sqft = area * 10.7639;
+      
+      // Determine building name based on size and position
+      let buildingName;
+      if (index === 0) {
+        buildingName = "Main Building";
+      } else if (feature.area > 100) {
+        buildingName = `Large Building ${index + 1}`;
+      } else {
+        buildingName = `Building ${index + 1}`;
+      }
+      
+      roofAreas.push({
+        id: `detected-${Date.now()}-${index}`,
+        sqm: area,
+        sqft: sqft,
+        geometry: feature.geometry,
+        type: 'detected',
+        name: buildingName,
+        centroid: feature.centroid
+      });
+    });
+    
+    return roofAreas;
+  };
+
+  // Create sample roof areas when building data is not available
+  const createSampleRoofAreas = (center) => {
+    const [lon, lat] = center;
+    const roofAreas = [];
+    
+    // Create 2-3 sample roof areas around the center point with more realistic shapes
+    // Adjust the offsets based on zoom level for better positioning
+    const zoom = mapRef.current?.getZoom() || 18;
+    const scaleFactor = Math.pow(2, 18 - zoom); // Scale based on zoom level
+    
+    const buildingConfigs = [
+      { 
+        lon: -0.0001 * scaleFactor, 
+        lat: 0.0001 * scaleFactor, 
+        width: 0.00012 * scaleFactor, 
+        height: 0.00008 * scaleFactor,
+        name: "Main Building"
+      }, // Main building (rectangular)
+      { 
+        lon: 0.0001 * scaleFactor, 
+        lat: -0.0001 * scaleFactor, 
+        width: 0.00008 * scaleFactor, 
+        height: 0.00006 * scaleFactor,
+        name: "Secondary Building"
+      },  // Secondary building (rectangular)
+      { 
+        lon: 0.00005 * scaleFactor, 
+        lat: 0.00015 * scaleFactor, 
+        width: 0.00006 * scaleFactor, 
+        height: 0.00004 * scaleFactor,
+        name: "Small Building"
+      }  // Small building (rectangular)
+    ];
+    
+    buildingConfigs.forEach((config, index) => {
+      const buildingCenter = [lon + config.lon, lat + config.lat];
+      
+      // Create a rectangular building instead of circular
+      const halfWidth = config.width / 2;
+      const halfHeight = config.height / 2;
+      
+      const buildingPolygon = turf.polygon([[
+        [buildingCenter[0] - halfWidth, buildingCenter[1] - halfHeight],
+        [buildingCenter[0] + halfWidth, buildingCenter[1] - halfHeight],
+        [buildingCenter[0] + halfWidth, buildingCenter[1] + halfHeight],
+        [buildingCenter[0] - halfWidth, buildingCenter[1] + halfHeight],
+        [buildingCenter[0] - halfWidth, buildingCenter[1] - halfHeight]
+      ]]);
+      
+      const area = turf.area(buildingPolygon);
+      const sqft = area * 10.7639;
+      
+      // Only include buildings with reasonable roof sizes (20-2000 sqm)
+      if (area >= 20 && area <= 2000) {
+        roofAreas.push({
+          id: `sample-${Date.now()}-${index}`,
+          sqm: area,
+          sqft: sqft,
+          geometry: buildingPolygon.geometry,
+          type: 'sample',
+          name: config.name
+        });
+      }
+    });
+    
+    return roofAreas;
   };
 
   // Update highlighted polygons when the state changes
@@ -394,6 +793,72 @@ export default function Home() {
     setHighlightedPolygons((prev) => prev.filter((p) => p.id !== id));
   };
 
+  // Add all detected roof areas to the main roof areas list
+  const addAllDetectedRoofs = () => {
+    if (detectedRoofs.length === 0) return;
+    
+    const newRoofAreas = detectedRoofs.map(roof => ({
+      id: roof.id,
+      sqm: roof.sqm,
+      sqft: roof.sqft,
+      geometry: roof.geometry
+    }));
+    
+    setRoofAreas(prev => [...prev, ...newRoofAreas]);
+    setHighlightedPolygons(prev => [...prev, ...detectedRoofs.map(roof => ({
+      id: roof.id,
+      geometry: roof.geometry
+    }))]);
+    
+    // Clear detected roofs
+    setDetectedRoofs([]);
+  };
+
+  // Add individual detected roof area
+  const addDetectedRoof = (roof) => {
+    const newRoofArea = {
+      id: roof.id,
+      sqm: roof.sqm,
+      sqft: roof.sqft,
+      geometry: roof.geometry
+    };
+    
+    setRoofAreas(prev => [...prev, newRoofArea]);
+    setHighlightedPolygons(prev => [...prev, {
+      id: roof.id,
+      geometry: roof.geometry
+    }]);
+    
+    // Remove from detected roofs
+    setDetectedRoofs(prev => prev.filter(r => r.id !== roof.id));
+  };
+
+  // Delete individual detected roof area
+  const deleteDetectedRoof = (roofId) => {
+    setDetectedRoofs(prev => prev.filter(r => r.id !== roofId));
+  };
+
+  // Clear all detected roof areas
+  const clearAllDetectedRoofs = () => {
+    setDetectedRoofs([]);
+  };
+
+  // Update highlighted polygons to include detected roofs
+  useEffect(() => {
+    if (detectedRoofs.length > 0) {
+      const allPolygons = [
+        ...highlightedPolygons,
+        ...detectedRoofs.map(roof => ({
+          id: roof.id,
+          geometry: roof.geometry
+        }))
+      ];
+      updateHighlightedPolygons(allPolygons);
+    } else {
+      updateHighlightedPolygons(highlightedPolygons);
+    }
+  }, [detectedRoofs, highlightedPolygons]);
+
   return (
     <div className="map-wrap">
       <div className="toolbar">
@@ -406,17 +871,44 @@ export default function Home() {
         <div>{areaInfo.sqm > 0 ? `${areaInfo.sqm.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²` : "—"}</div>
         <div>{areaInfo.sqft > 0 ? `${areaInfo.sqft.toLocaleString(undefined, { maximumFractionDigits: 2 })} ft²` : "—"}</div>
       </div>
+      
 
       <aside className="form-panel">
+        <div className="logo-container">
+          <img 
+            src="https://parkvistaroofing.com/wp-content/uploads/2019/09/Park-Place-Roofing-02.png" 
+            alt="Park Vista Roofing Logo" 
+          />
+        </div>
         <div className="stepper">
-          <div className={`step ${currentStep === 1 ? "active" : ""}`}>1</div>
-          <div className={`step ${currentStep === 2 ? "active" : ""}`}>2</div>
-          <div className={`step ${currentStep === 3 ? "active" : ""}`}>3</div>
+          <div className={`step ${currentStep === 1 ? "active" : ""} ${currentStep > 1 ? "completed" : ""}`}>1</div>
+          <div className={`step ${currentStep === 2 ? "active" : ""} ${currentStep > 2 ? "completed" : ""}`}>2</div>
+          <div className={`step ${currentStep === 3 ? "active" : ""} ${currentStep > 3 ? "completed" : ""}`}>3</div>
         </div>
 
         {currentStep === 1 && (
           <div className="step-content">
-            <h3>Select roof area</h3>
+            <h3>Select Roof Area</h3>
+            
+            {/* Search Address Section */}
+            <div className="search-section">
+              <label>
+                <span>Search Address</span>
+                <div id="form-search-container" className="form-search-container"></div>
+              </label>
+              {addressError && <div className="error-message">{addressError}</div>}
+            </div>
+            
+            {/* Action Buttons */}
+            <div className="form-action-buttons">
+              <button className="form-action-button primary" onClick={startPolygonMode}>
+                🏠 Add Roof Area
+              </button>
+              <button className="form-action-button secondary" onClick={deleteSelected}>
+                🗑️ Delete Selected
+              </button>
+            </div>
+            
             <div className="instructions">
               <div className="instruction-step">
                 <span className="step-number">1</span>
@@ -424,17 +916,20 @@ export default function Home() {
               </div>
               <div className="instruction-step">
                 <span className="step-number">2</span>
-                <span>Click &quot;Draw new roof shape&quot; button 2</span>
+                <span>Review automatically detected roof areas</span>
               </div>
               <div className="instruction-step">
                 <span className="step-number">3</span>
-                <span>Click on the map to draw around the roof area</span>
-              </div>
-              <div className="instruction-step">
-                <span className="step-number">4</span>
-                <span>Double-click to finish drawing</span>
+                <span>Add detected areas or draw custom shapes</span>
               </div>
             </div>
+            
+            {isDetectingRoofs && (
+              <div className="detection-indicator">
+                <div className="pulse-dot"></div>
+                <span>Automatically detecting roof areas...</span>
+              </div>
+            )}
             
             {isDrawingMode && (
               <div className="drawing-mode-indicator">
@@ -448,12 +943,68 @@ export default function Home() {
               <div>{address || "—"}</div>
             </div>
             {addressError && <div className="error-message">{addressError}</div>}
+            
+            {/* Show detected roof areas */}
+            {detectedRoofs.length > 0 && (
+              <div className="detected-roofs">
+                <div className="detected-header">
+                  <strong>Automatically Detected Roof Areas ({detectedRoofs.length})</strong>
+                  <div className="detected-actions">
+                    <button 
+                      className="add-all-btn" 
+                      onClick={addAllDetectedRoofs}
+                      title="Add all detected roof areas"
+                    >
+                      Add All
+                    </button>
+                    <button 
+                      className="clear-all-btn" 
+                      onClick={clearAllDetectedRoofs}
+                      title="Clear all detected roof areas"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+                {detectedRoofs.map((roof, index) => (
+                  <div key={roof.id} className="detected-roof-item">
+                    <div className="roof-info">
+                      <div className="roof-name">{roof.name}</div>
+                      <div className="roof-area">
+                        {roof.sqm.toLocaleString(undefined, { maximumFractionDigits: 2 })} m² 
+                        ({roof.sqft.toLocaleString(undefined, { maximumFractionDigits: 2 })} ft²)
+                      </div>
+                      {roof.type === 'sample' && (
+                        <div className="roof-type-indicator">Estimated</div>
+                      )}
+                    </div>
+                    <div className="roof-actions">
+                      <button 
+                        className="add-roof-btn" 
+                        onClick={() => addDetectedRoof(roof)}
+                        title="Add this roof area"
+                      >
+                        Add
+                      </button>
+                      <button 
+                        className="delete-roof-btn" 
+                        onClick={() => deleteDetectedRoof(roof.id)}
+                        title="Delete this detected roof area"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            
             <div className="summary">
-              <div><strong>Area</strong></div>
+              <div><strong>Current Drawing Area</strong></div>
               <div>{areaInfo.sqm > 0 ? `${areaInfo.sqm.toLocaleString(undefined, { maximumFractionDigits: 2 })} m² (${areaInfo.sqft.toLocaleString(undefined, { maximumFractionDigits: 2 })} ft²)` : "—"}</div>
             </div>
             <div className="actions">
-              <button onClick={addCurrentRoofArea} disabled={!address || areaInfo.sqm <= 0 || addressError}>Add roof area</button>
+              <button onClick={addCurrentRoofArea} disabled={!address || areaInfo.sqm <= 0 || addressError}>Add current area</button>
               <button className="primary" onClick={goNext} disabled={roofAreas.length === 0}>Next</button>
             </div>
 
@@ -484,7 +1035,7 @@ export default function Home() {
 
         {currentStep === 2 && (
           <form className="step-content" onSubmit={(e) => { e.preventDefault(); goNext(); }}>
-            <h3>Your details</h3>
+            <h3>Your Details</h3>
             <label>
               <span>Name</span>
               <input name="name" value={formValues.name} onChange={handleChange} placeholder="John Doe" />
