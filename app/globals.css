@@ -132,6 +132,18 @@ a {
   .form-action-buttons {
     flex-direction: column;
   }
+  .actions {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .actions button {
+    padding: 10px 20px;
+    font-size: 14px;
+  }
+  .actions .primary {
+    padding: 12px 20px;
+    font-size: 14px;
+  }
 }
 
 /* Right side form panel */
@@ -272,7 +284,7 @@ a {
   box-shadow: 0 4px 15px rgba(100, 204, 50, 0.4);
 }
 
-.form-action-button.primary:hover {
+.form-action-button.primary:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(100, 204, 50, 0.6);
   background: linear-gradient(135deg, #5ab82e 0%, #428a20 100%);
@@ -284,7 +296,7 @@ a {
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
 }
 
-.form-action-button.secondary:hover {
+.form-action-button.secondary:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
   background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
@@ -447,16 +459,18 @@ a {
   transition: all 0.3s ease;
 }
 
-.actions .primary:hover {
+.actions .primary:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(100, 204, 50, 0.6);
+  background: linear-gradient(135deg, #5ab82e 0%, #428a20 100%);
 }
 
 .actions .primary:disabled {
-  background: #9ca3af;
-  box-shadow: none;
-  transform: none;
-  cursor: not-allowed;
+  background: #9ca3af !important;
+  box-shadow: none !important;
+  transform: none !important;
+  cursor: not-allowed !important;
+  opacity: 0.6;
 }
 
 .actions button {
@@ -472,11 +486,19 @@ a {
   backdrop-filter: blur(10px);
 }
 
-.actions button:hover {
+.actions button:hover:not(:disabled) {
   background: #f8fafc;
   border-color: #cbd5e1;
   transform: translateY(-1px);
   box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+.actions button:disabled {
+  background: #f3f4f6 !important;
+  border-color: #d1d5db !important;
+  color: #9ca3af !important;
+  cursor: not-allowed !important;
+  opacity: 0.6;
 }
 
 .error {
@@ -503,6 +525,29 @@ a {
   }
   .toolbar {
     top: 130px; /* Extra spacing on smaller screens */
+  }
+  .actions {
+    gap: 10px;
+  }
+  .actions button {
+    padding: 11px 22px;
+  }
+  .actions .primary {
+    padding: 13px 22px;
+  }
+}
+
+@media (max-width: 768px) {
+  .actions {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .actions button {
+    width: 100%;
+    padding: 12px 20px;
+  }
+  .actions .primary {
+    padding: 14px 20px;
   }
 }
 
@@ -681,6 +726,51 @@ a {
   }
 }
 
+/* Auto-add message styling */
+.auto-add-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+  border: 2px solid #64cc32;
+  border-radius: 8px;
+  margin: 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #166534;
+  animation: slideInDown 0.5s ease-out;
+  box-shadow: 0 4px 15px rgba(100, 204, 50, 0.2);
+}
+
+.auto-add-message .success-icon {
+  font-size: 16px;
+  animation: bounce 1s ease-in-out;
+}
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes bounce {
+  0%, 20%, 50%, 80%, 100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-5px);
+  }
+  60% {
+    transform: translateY(-3px);
+  }
+}
+
 /* Detected roof areas */
 .detected-roofs {
   margin: 16px 0;
@@ -827,3 +917,4 @@ a {
   background: #dc2626;
   border-color: #dc2626;
 }
+

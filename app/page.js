@@ -32,6 +32,7 @@ export default function Home() {
   const [isDrawingMode, setIsDrawingMode] = useState(false); // Track if user is in drawing mode
   const [isDetectingRoofs, setIsDetectingRoofs] = useState(false); // Track automatic roof detection
   const [detectedRoofs, setDetectedRoofs] = useState([]); // Store automatically detected roof areas
+  const [autoAddMessage, setAutoAddMessage] = useState(""); // Message for auto-added roof areas
 
   useEffect(() => {
     if (!mapContainerRef.current) {
@@ -197,7 +198,9 @@ export default function Home() {
           setRoofAreas([]);
           setHighlightedPolygons([]);
           setDetectedRoofs([]);
-          // Trigger automatic roof detection
+          setAutoAddMessage(""); // Clear any previous auto-add message
+          
+          // Just detect and suggest roof areas (don't auto-add them)
           setTimeout(() => {
             detectRoofAreas([lon, lat]);
           }, 1000); // Wait for map to settle
@@ -241,6 +244,9 @@ export default function Home() {
               setRoofAreas([]);
               setHighlightedPolygons([]);
               setDetectedRoofs([]);
+              setAutoAddMessage(""); // Clear any previous auto-add message
+              
+              // Just detect and suggest roof areas (don't auto-add them)
               setTimeout(() => {
                 detectRoofAreas([lon, lat]);
               }, 1000);
@@ -306,7 +312,8 @@ export default function Home() {
         type: 'Feature',
         properties: {
           id: polygon.id,
-          color: `hsl(${(index * 137.5) % 360}, 70%, 50%)` // Generate different colors
+          color: '#64cc32', // Use brand green color
+          area: polygon.area || 'Unknown'
         },
         geometry: polygon.geometry
       }))
@@ -318,26 +325,30 @@ export default function Home() {
       data: geojson
     });
     
+    // Add fill layer with brand green color
     map.addLayer({
       id: 'highlighted-polygons',
       type: 'fill',
       source: 'highlighted-polygons',
       paint: {
-        'fill-color': ['get', 'color'],
-        'fill-opacity': 0.6
+        'fill-color': '#64cc32',
+        'fill-opacity': 0.3
       }
     });
     
+    // Add outline layer with thicker, more visible lines
     map.addLayer({
       id: 'highlighted-polygons-outline',
       type: 'line',
       source: 'highlighted-polygons',
       paint: {
-        'line-color': ['get', 'color'],
-        'line-width': 3,
-        'line-opacity': 0.8
+        'line-color': '#64cc32',
+        'line-width': 4,
+        'line-opacity': 1
       }
     });
+    
+    console.log(`Highlighted ${polygons.length} roof areas on the map`);
   };
 
   // Function to add building outlines for better roof identification
@@ -541,21 +552,18 @@ export default function Home() {
       }
       
       
+      // Always create sample roof areas for consistent user experience
+      console.log('Creating sample roof areas for automatic measurement');
+      const sampleRoofs = createSampleRoofAreas(center);
+      setDetectedRoofs(sampleRoofs);
+      
+      // Also try to process real building features if found
       if (features && features.length > 0) {
-        // Process the found features
-        const roofAreas = processBuildingFeatures(features, center);
-        if (roofAreas.length > 0) {
-          setDetectedRoofs(roofAreas);
-        } else {
-          // If no valid buildings found, create sample roof areas
-          const sampleRoofs = createSampleRoofAreas(center);
-          setDetectedRoofs(sampleRoofs);
+        const realRoofAreas = processBuildingFeatures(features, center);
+        if (realRoofAreas.length > 0) {
+          console.log(`Found ${realRoofAreas.length} real building features, using those instead`);
+          setDetectedRoofs(realRoofAreas);
         }
-      } else {
-        // No building data found, create sample roof areas
-        console.log('No building features found, creating sample roof areas');
-        const sampleRoofs = createSampleRoofAreas(center);
-        setDetectedRoofs(sampleRoofs);
       }
     } catch (error) {
       console.error('Error detecting roof areas:', error);
@@ -642,30 +650,27 @@ export default function Home() {
     const roofAreas = [];
     
     // Create 2-3 sample roof areas around the center point with more realistic shapes
-    // Adjust the offsets based on zoom level for better positioning
-    const zoom = mapRef.current?.getZoom() || 18;
-    const scaleFactor = Math.pow(2, 18 - zoom); // Scale based on zoom level
-    
+    // Use fixed offsets that work well at zoom level 18
     const buildingConfigs = [
       { 
-        lon: -0.0001 * scaleFactor, 
-        lat: 0.0001 * scaleFactor, 
-        width: 0.00012 * scaleFactor, 
-        height: 0.00008 * scaleFactor,
+        lon: -0.00008, 
+        lat: 0.00006, 
+        width: 0.0001, 
+        height: 0.00007,
         name: "Main Building"
       }, // Main building (rectangular)
       { 
-        lon: 0.0001 * scaleFactor, 
-        lat: -0.0001 * scaleFactor, 
-        width: 0.00008 * scaleFactor, 
-        height: 0.00006 * scaleFactor,
+        lon: 0.00008, 
+        lat: -0.00006, 
+        width: 0.00007, 
+        height: 0.00005,
         name: "Secondary Building"
       },  // Secondary building (rectangular)
       { 
-        lon: 0.00005 * scaleFactor, 
-        lat: 0.00015 * scaleFactor, 
-        width: 0.00006 * scaleFactor, 
-        height: 0.00004 * scaleFactor,
+        lon: 0.00004, 
+        lat: 0.00012, 
+        width: 0.00005, 
+        height: 0.000035,
         name: "Small Building"
       }  // Small building (rectangular)
     ];
@@ -673,7 +678,7 @@ export default function Home() {
     buildingConfigs.forEach((config, index) => {
       const buildingCenter = [lon + config.lon, lat + config.lat];
       
-      // Create a rectangular building instead of circular
+      // Create a rectangular building
       const halfWidth = config.width / 2;
       const halfHeight = config.height / 2;
       
@@ -688,8 +693,8 @@ export default function Home() {
       const area = turf.area(buildingPolygon);
       const sqft = area * 10.7639;
       
-      // Only include buildings with reasonable roof sizes (20-2000 sqm)
-      if (area >= 20 && area <= 2000) {
+      // Include buildings with reasonable roof sizes (50-1500 sqm)
+      if (area >= 50 && area <= 1500) {
         roofAreas.push({
           id: `sample-${Date.now()}-${index}`,
           sqm: area,
@@ -701,6 +706,7 @@ export default function Home() {
       }
     });
     
+    console.log(`Created ${roofAreas.length} sample roof areas`);
     return roofAreas;
   };
 
@@ -814,6 +820,53 @@ export default function Home() {
     setDetectedRoofs([]);
   };
 
+  // Automatically add detected roof areas (up to 3) for easier user experience
+  const autoAddDetectedRoofs = () => {
+    console.log('Auto-adding detected roof areas...', detectedRoofs.length);
+    
+    if (detectedRoofs.length === 0) {
+      console.log('No detected roof areas to add');
+      return;
+    }
+    
+    // Take up to 3 detected roof areas
+    const roofsToAdd = detectedRoofs.slice(0, 3);
+    console.log(`Adding ${roofsToAdd.length} roof areas:`, roofsToAdd);
+    
+    const newRoofAreas = roofsToAdd.map(roof => ({
+      id: roof.id,
+      sqm: roof.sqm,
+      sqft: roof.sqft,
+      geometry: roof.geometry
+    }));
+    
+    setRoofAreas(prev => {
+      const updated = [...prev, ...newRoofAreas];
+      console.log('Updated roof areas:', updated);
+      return updated;
+    });
+    
+    const newHighlightedPolygons = roofsToAdd.map(roof => ({
+      id: roof.id,
+      geometry: roof.geometry
+    }));
+    
+    setHighlightedPolygons(prev => [...prev, ...newHighlightedPolygons]);
+    
+    // Remove the added roofs from detected roofs
+    setDetectedRoofs(prev => prev.slice(3));
+    
+    // Show a brief notification that roof areas were automatically added
+    setAutoAddMessage(`✅ Automatically added ${roofsToAdd.length} roof areas for easier setup!`);
+    
+    // Clear the message after 5 seconds
+    setTimeout(() => {
+      setAutoAddMessage("");
+    }, 5000);
+    
+    console.log(`Successfully added ${roofsToAdd.length} roof areas for easier setup!`);
+  };
+
   // Add individual detected roof area
   const addDetectedRoof = (roof) => {
     const newRoofArea = {
@@ -842,6 +895,8 @@ export default function Home() {
   const clearAllDetectedRoofs = () => {
     setDetectedRoofs([]);
   };
+
+
 
   // Update highlighted polygons to include detected roofs
   useEffect(() => {
@@ -916,18 +971,25 @@ export default function Home() {
               </div>
               <div className="instruction-step">
                 <span className="step-number">2</span>
-                <span>Review automatically detected roof areas</span>
+                <span>View building outlines and suggested roof areas</span>
               </div>
               <div className="instruction-step">
                 <span className="step-number">3</span>
-                <span>Add detected areas or draw custom shapes</span>
+                <span>Add suggested areas or draw custom shapes</span>
               </div>
             </div>
             
             {isDetectingRoofs && (
               <div className="detection-indicator">
                 <div className="pulse-dot"></div>
-                <span>Automatically detecting roof areas...</span>
+                <span>Analyzing area for roof suggestions...</span>
+              </div>
+            )}
+            
+            {autoAddMessage && (
+              <div className="auto-add-message">
+                <div className="success-icon">✅</div>
+                <span>{autoAddMessage}</span>
               </div>
             )}
             
@@ -937,6 +999,7 @@ export default function Home() {
                 <span>Drawing mode active - Click on the map to start drawing</span>
               </div>
             )}
+            
             
             <div className="summary">
               <div><strong>Address</strong></div>
@@ -948,19 +1011,19 @@ export default function Home() {
             {detectedRoofs.length > 0 && (
               <div className="detected-roofs">
                 <div className="detected-header">
-                  <strong>Automatically Detected Roof Areas ({detectedRoofs.length})</strong>
+                  <strong>Suggested Roof Areas ({detectedRoofs.length})</strong>
                   <div className="detected-actions">
                     <button 
                       className="add-all-btn" 
                       onClick={addAllDetectedRoofs}
-                      title="Add all detected roof areas"
+                      title="Add all suggested roof areas"
                     >
                       Add All
                     </button>
                     <button 
                       className="clear-all-btn" 
                       onClick={clearAllDetectedRoofs}
-                      title="Clear all detected roof areas"
+                      title="Clear all suggested roof areas"
                     >
                       Clear All
                     </button>
