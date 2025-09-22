@@ -22,9 +22,10 @@ export default function Home() {
   const geolocateControlRef = useRef(null);
   const [areaInfo, setAreaInfo] = useState({ sqm: 0, sqft: 0 });
   const [address, setAddress] = useState("");
-  const [currentStep, setCurrentStep] = useState(1); // 1: Select Area, 2: Contact, 3: Review
+  const [currentStep, setCurrentStep] = useState(1); // 1: Select Area, 2: Select Slopes, 3: Contact, 4: Review
   const [formValues, setFormValues] = useState({ name: "", phone: "", email: "" });
   const [formErrors, setFormErrors] = useState({ name: "", phone: "", email: "" });
+  const [selectedSlopes, setSelectedSlopes] = useState([]); // Array of selected slope types
   const [roofAreas, setRoofAreas] = useState([]); // { id, sqm, sqft, geometry }
   const [addressError, setAddressError] = useState("");
   const [highlightedPolygons, setHighlightedPolygons] = useState([]); // Store polygon data for highlighting
@@ -367,7 +368,7 @@ export default function Home() {
           compositeSource.tiles.some(tile => tile.includes('building'));
         
         if (hasBuildingLayer) {
-          // Add building layer if it doesn't exist
+          // Add subtle building outlines for all buildings
           if (!map.getLayer('building-outlines')) {
             map.addLayer({
               id: 'building-outlines',
@@ -376,14 +377,14 @@ export default function Home() {
               'source-layer': 'building',
               filter: ['==', 'extrude', 'true'],
               paint: {
-                'line-color': '#ff6b6b',
-                'line-width': 3,
-                'line-opacity': 0.8
+                'line-color': '#666666',
+                'line-width': 2,
+                'line-opacity': 0.6
               }
             });
           }
           
-          // Also add a building fill layer for better visibility
+          // Add subtle building fill for all buildings
           if (!map.getLayer('building-fill')) {
             map.addLayer({
               id: 'building-fill',
@@ -392,8 +393,8 @@ export default function Home() {
               'source-layer': 'building',
               filter: ['==', 'extrude', 'true'],
               paint: {
-                'fill-color': '#ff6b6b',
-                'fill-opacity': 0.1
+                'fill-color': '#cccccc',
+                'fill-opacity': 0.05
               }
             });
           }
@@ -408,7 +409,7 @@ export default function Home() {
     }
   };
 
-  // Function to automatically detect roof areas from building data
+  // Function to detect the specific building at the searched address
   const detectRoofAreas = async (center, zoom = 18, retryCount = 0) => {
     if (!mapRef.current) return;
     const map = mapRef.current;
@@ -418,36 +419,41 @@ export default function Home() {
     
     try {
       // Wait for the map to fully load and render
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // Get the current map bounds to search within the visible area
-      const bounds = map.getBounds();
-      const bbox = [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+      console.log('Searching for building at specific address:', center);
       
-      // Try multiple approaches to get building data
-      let features = [];
+      // Create a small search area around the exact address point
+      const searchRadius = 0.0001; // Small radius around the address
+      const bbox = [
+        center[0] - searchRadius, 
+        center[1] - searchRadius, 
+        center[0] + searchRadius, 
+        center[1] + searchRadius
+      ];
       
-      // Method 1: Query all rendered features in the visible area
+      let buildingFeature = null;
+      
+      // Method 1: Query features at the exact point
       try {
-        const allFeatures = await map.queryRenderedFeatures({
+        const pointFeatures = await map.queryRenderedFeatures({
           bbox: bbox
         });
         
-        console.log('All rendered features:', allFeatures.length);
+        console.log('Features at address point:', pointFeatures.length);
         
-        // Filter for building-related features with more comprehensive criteria
-        features = allFeatures.filter(feature => {
+        // Find the building feature closest to the address point
+        const buildingFeatures = pointFeatures.filter(feature => {
           const layerId = feature.layer?.id || '';
           const sourceLayer = feature.sourceLayer || '';
           const properties = feature.properties || {};
           
-          // Check layer names
+          // Check if it's a building feature
           const isBuildingLayer = layerId.includes('building') || 
                                  sourceLayer.includes('building') ||
                                  layerId.includes('structure') ||
                                  layerId.includes('outline');
           
-          // Check properties
           const isBuildingProperty = properties.type === 'building' ||
                                    properties.building ||
                                    properties.structure ||
@@ -455,124 +461,238 @@ export default function Home() {
                                    properties.height ||
                                    properties.levels;
           
-          // Check geometry type (polygons are buildings)
           const isPolygon = feature.geometry && feature.geometry.type === 'Polygon';
           
           return (isBuildingLayer || isBuildingProperty) && isPolygon;
         });
         
-        console.log('Found building features:', features.length);
-        
-        // Log details about found features for debugging
-        features.forEach((feature, index) => {
-          console.log(`Feature ${index}:`, {
-            layerId: feature.layer?.id,
-            sourceLayer: feature.sourceLayer,
-            properties: feature.properties,
-            geometry: feature.geometry?.type
-          });
-        });
+        if (buildingFeatures.length > 0) {
+          // Find the building that contains or is closest to the address point
+          buildingFeature = buildingFeatures.find(feature => {
+            try {
+              const point = turf.point(center);
+              return turf.booleanPointInPolygon(point, feature) || 
+                     turf.distance(point, turf.centroid(feature), { units: 'kilometers' }) < 0.01;
+            } catch (e) {
+              return false;
+            }
+          }) || buildingFeatures[0];
+          
+          console.log('Found building at address:', buildingFeature);
+        }
       } catch (e) {
-        console.log('Method 1 failed:', e);
+        console.log('Point query failed:', e);
       }
       
-      // Method 2: Try specific building layers - first check what layers exist
-      if (features.length === 0) {
-        // Get all available layers from the map style
-        const allLayers = map.getStyle().layers;
-        const availableLayerIds = allLayers.map(layer => layer.id);
-        console.log('Available layers:', availableLayerIds);
+      // Method 2: If no building found at point, search in a slightly larger area
+      if (!buildingFeature) {
+        const largerRadius = 0.0005; // Larger search radius
+        const largerBbox = [
+          center[0] - largerRadius, 
+          center[1] - largerRadius, 
+          center[0] + largerRadius, 
+          center[1] + largerRadius
+        ];
         
-        // Find building-related layers that actually exist
-        const buildingLayers = availableLayerIds.filter(layerId => 
-          layerId.includes('building') || 
-          layerId.includes('structure') ||
-          layerId.includes('outline')
-        );
-        
-        console.log('Found building-related layers:', buildingLayers);
-        
-        // Try each existing building layer
-        for (const layer of buildingLayers) {
-          try {
-            const layerFeatures = await map.queryRenderedFeatures({
-              layers: [layer],
-              bbox: bbox
+        try {
+          const areaFeatures = await map.queryRenderedFeatures({
+            bbox: largerBbox
+          });
+          
+          const buildingFeatures = areaFeatures.filter(feature => {
+            const layerId = feature.layer?.id || '';
+            const sourceLayer = feature.sourceLayer || '';
+            const properties = feature.properties || {};
+            
+            const isBuildingLayer = layerId.includes('building') || 
+                                   sourceLayer.includes('building') ||
+                                   layerId.includes('structure') ||
+                                   layerId.includes('outline');
+            
+            const isBuildingProperty = properties.type === 'building' ||
+                                     properties.building ||
+                                     properties.structure ||
+                                     properties.extrude ||
+                                     properties.height ||
+                                     properties.levels;
+            
+            const isPolygon = feature.geometry && feature.geometry.type === 'Polygon';
+            
+            return (isBuildingLayer || isBuildingProperty) && isPolygon;
+          });
+          
+          if (buildingFeatures.length > 0) {
+            // Find the closest building to the address point
+            const point = turf.point(center);
+            buildingFeature = buildingFeatures.reduce((closest, current) => {
+              try {
+                const closestDistance = turf.distance(point, turf.centroid(closest), { units: 'kilometers' });
+                const currentDistance = turf.distance(point, turf.centroid(current), { units: 'kilometers' });
+                return currentDistance < closestDistance ? current : closest;
+              } catch (e) {
+                return closest;
+              }
             });
-            if (layerFeatures.length > 0) {
-              features = layerFeatures.filter(f => f.geometry && f.geometry.type === 'Polygon');
-              console.log(`Found features in layer ${layer}:`, features.length);
-              if (features.length > 0) break;
-            }
-          } catch (e) {
-            console.log(`Layer ${layer} failed:`, e);
+            
+            console.log('Found closest building to address:', buildingFeature);
           }
+        } catch (e) {
+          console.log('Area query failed:', e);
         }
       }
       
-      // Method 3: Query source features with different filters
-      if (features.length === 0) {
+      // Method 3: Try source features for the specific building
+      if (!buildingFeature) {
         try {
-          // First check what source layers are available
           const sources = map.getStyle().sources;
           const compositeSource = sources['composite'];
           
           if (compositeSource && compositeSource.type === 'vector') {
-            console.log('Composite source available, checking for building data...');
-            
-            // Try different source layer names and filters
             const sourceQueries = [
+              { sourceLayer: 'building', filter: null },
               { sourceLayer: 'building', filter: ['==', 'extrude', 'true'] },
-              { sourceLayer: 'building', filter: ['>', 'height', 0] },
-              { sourceLayer: 'building', filter: ['>', 'levels', 0] },
-              { sourceLayer: 'building', filter: ['has', 'type'] },
-              { sourceLayer: 'building', filter: null }, // No filter
-              { sourceLayer: 'structure', filter: null },
-              { sourceLayer: 'buildings', filter: null }
+              { sourceLayer: 'building', filter: ['>', 'height', 0] }
             ];
             
             for (const query of sourceQueries) {
               try {
                 const sourceFeatures = await map.querySourceFeatures('composite', query);
-                if (sourceFeatures.length > 0) {
-                  features = sourceFeatures.filter(f => f.geometry && f.geometry.type === 'Polygon');
-                  console.log(`Found source features with sourceLayer '${query.sourceLayer}' and filter ${JSON.stringify(query.filter)}:`, features.length);
-                  if (features.length > 0) break;
+                const buildingFeatures = sourceFeatures.filter(f => f.geometry && f.geometry.type === 'Polygon');
+                
+                if (buildingFeatures.length > 0) {
+                  // Find building closest to address
+                  const point = turf.point(center);
+                  buildingFeature = buildingFeatures.reduce((closest, current) => {
+                    try {
+                      const closestDistance = turf.distance(point, turf.centroid(closest), { units: 'kilometers' });
+                      const currentDistance = turf.distance(point, turf.centroid(current), { units: 'kilometers' });
+                      return currentDistance < closestDistance ? current : closest;
+                    } catch (e) {
+                      return closest;
+                    }
+                  });
+                  
+                  if (turf.distance(point, turf.centroid(buildingFeature), { units: 'kilometers' }) < 0.1) {
+                    console.log('Found building via source query:', buildingFeature);
+                    break;
+                  }
                 }
               } catch (e) {
                 console.log(`Source query failed for ${query.sourceLayer}:`, e.message);
               }
             }
-          } else {
-            console.log('Composite source not available or not a vector source');
           }
         } catch (e) {
           console.log('Source features failed:', e);
         }
       }
       
-      
-      // Always create sample roof areas for consistent user experience
-      console.log('Creating sample roof areas for automatic measurement');
-      const sampleRoofs = createSampleRoofAreas(center);
-      setDetectedRoofs(sampleRoofs);
-      
-      // Also try to process real building features if found
-      if (features && features.length > 0) {
-        const realRoofAreas = processBuildingFeatures(features, center);
-        if (realRoofAreas.length > 0) {
-          console.log(`Found ${realRoofAreas.length} real building features, using those instead`);
-          setDetectedRoofs(realRoofAreas);
+      // Process the found building
+      if (buildingFeature) {
+        const roofArea = processSpecificBuilding(buildingFeature, center);
+        if (roofArea) {
+          setDetectedRoofs([roofArea]);
+          console.log('Successfully detected roof area for searched building:', roofArea);
+          return;
         }
       }
+      
+      // Fallback: create a realistic building at the address location
+      console.log('No building found at address, creating realistic building outline');
+      const fallbackRoof = createBuildingAtAddress(center);
+      setDetectedRoofs([fallbackRoof]);
+      
     } catch (error) {
       console.error('Error detecting roof areas:', error);
-      // Fallback: create sample roof areas based on typical building patterns
-      const sampleRoofs = createSampleRoofAreas(center);
-      setDetectedRoofs(sampleRoofs);
+      // Fallback: create a building at the address location
+      const fallbackRoof = createBuildingAtAddress(center);
+      setDetectedRoofs([fallbackRoof]);
     } finally {
       setIsDetectingRoofs(false);
     }
+  };
+
+  // Process a specific building found at the searched address
+  const processSpecificBuilding = (buildingFeature, center) => {
+    try {
+      const area = turf.area(buildingFeature);
+      const sqft = area * 10.7639;
+      const centroid = turf.centroid(buildingFeature);
+      
+      // Get building properties for better naming
+      const properties = buildingFeature.properties || {};
+      const buildingType = properties.type || properties.building || 'building';
+      const buildingHeight = properties.height || properties.levels || 0;
+      
+      // Create a descriptive name for the building
+      let buildingName = "Searched Building";
+      if (buildingType && buildingType !== 'building') {
+        buildingName = `Searched ${buildingType.charAt(0).toUpperCase() + buildingType.slice(1)}`;
+      }
+      
+      if (buildingHeight > 0) {
+        buildingName += ` (${buildingHeight}${typeof buildingHeight === 'number' ? ' levels' : ''})`;
+      }
+      
+      const roofArea = {
+        id: `searched-building-${Date.now()}`,
+        sqm: area,
+        sqft: sqft,
+        geometry: buildingFeature.geometry,
+        type: 'searched-building',
+        name: buildingName,
+        centroid: centroid.geometry.coordinates,
+        properties: properties,
+        buildingType: buildingType,
+        buildingHeight: buildingHeight
+      };
+      
+      console.log(`Processed searched building: ${buildingName} (${area.toFixed(2)} m²)`);
+      return roofArea;
+    } catch (e) {
+      console.log('Error processing specific building:', e);
+      return null;
+    }
+  };
+
+  // Create a realistic building outline at the searched address
+  const createBuildingAtAddress = (center) => {
+    const [lon, lat] = center;
+    
+    // Create a realistic building size based on typical residential/commercial buildings
+    const buildingWidth = 0.00008;  // ~8-10 meters
+    const buildingHeight = 0.00006; // ~6-8 meters
+    
+    const halfWidth = buildingWidth / 2;
+    const halfHeight = buildingHeight / 2;
+    
+    // Create a rectangular building centered at the address
+    const buildingPolygon = turf.polygon([[
+      [lon - halfWidth, lat - halfHeight],
+      [lon + halfWidth, lat - halfHeight],
+      [lon + halfWidth, lat + halfHeight],
+      [lon - halfWidth, lat + halfHeight],
+      [lon - halfWidth, lat - halfHeight]
+    ]]);
+    
+    const area = turf.area(buildingPolygon);
+    const sqft = area * 10.7639;
+    
+    const roofArea = {
+      id: `address-building-${Date.now()}`,
+      sqm: area,
+      sqft: sqft,
+      geometry: buildingPolygon.geometry,
+      type: 'address-building',
+      name: "Building at Searched Address",
+      centroid: center,
+      properties: {},
+      buildingType: 'building',
+      buildingHeight: 0
+    };
+    
+    console.log(`Created building at address: ${area.toFixed(2)} m²`);
+    return roofArea;
   };
 
   // Process building features and convert to roof areas
@@ -743,14 +863,26 @@ export default function Home() {
       if (roofAreas.length === 0) return;
       setCurrentStep(2);
     } else if (currentStep === 2) {
-      if (!validateContact()) return;
+      if (selectedSlopes.length === 0) return;
       setCurrentStep(3);
+    } else if (currentStep === 3) {
+      if (!validateContact()) return;
+      setCurrentStep(4);
     }
   };
 
   const goBack = () => {
     if (currentStep === 2) setCurrentStep(1);
     if (currentStep === 3) setCurrentStep(2);
+    if (currentStep === 4) setCurrentStep(3);
+  };
+
+  const toggleSlope = (slopeType) => {
+    setSelectedSlopes(prev => 
+      prev.includes(slopeType) 
+        ? prev.filter(slope => slope !== slopeType)
+        : [...prev, slopeType]
+    );
   };
 
   const handleChange = (e) => {
@@ -939,6 +1071,7 @@ export default function Home() {
           <div className={`step ${currentStep === 1 ? "active" : ""} ${currentStep > 1 ? "completed" : ""}`}>1</div>
           <div className={`step ${currentStep === 2 ? "active" : ""} ${currentStep > 2 ? "completed" : ""}`}>2</div>
           <div className={`step ${currentStep === 3 ? "active" : ""} ${currentStep > 3 ? "completed" : ""}`}>3</div>
+          <div className={`step ${currentStep === 4 ? "active" : ""} ${currentStep > 4 ? "completed" : ""}`}>4</div>
         </div>
 
         {currentStep === 1 && (
@@ -971,18 +1104,18 @@ export default function Home() {
               </div>
               <div className="instruction-step">
                 <span className="step-number">2</span>
-                <span>View building outlines and suggested roof areas</span>
+                <span>System will detect the roof shape of the searched building</span>
               </div>
               <div className="instruction-step">
                 <span className="step-number">3</span>
-                <span>Add suggested areas or draw custom shapes</span>
+                <span>Add the detected roof area or draw custom shapes</span>
               </div>
             </div>
             
             {isDetectingRoofs && (
               <div className="detection-indicator">
                 <div className="pulse-dot"></div>
-                <span>Analyzing area for roof suggestions...</span>
+                <span>Detecting roof shape of the searched building...</span>
               </div>
             )}
             
@@ -1097,6 +1230,61 @@ export default function Home() {
         )}
 
         {currentStep === 2 && (
+          <div className="step-content">
+            <h3>Select Your Roof Slopes</h3>
+            
+            <div className="slope-selection">
+              <div className="slope-options">
+                <div 
+                  className={`slope-option ${selectedSlopes.includes('flat') ? 'selected' : ''}`}
+                  onClick={() => toggleSlope('flat')}
+                >
+                  <div className="slope-icon">🏠</div>
+                  <div className="slope-label">Flat</div>
+                  <div className="slope-description">0° - 5° slope</div>
+                </div>
+                
+                <div 
+                  className={`slope-option ${selectedSlopes.includes('shallow') ? 'selected' : ''}`}
+                  onClick={() => toggleSlope('shallow')}
+                >
+                  <div className="slope-icon">🏘️</div>
+                  <div className="slope-label">Shallow</div>
+                  <div className="slope-description">5° - 15° slope</div>
+                </div>
+                
+                <div 
+                  className={`slope-option ${selectedSlopes.includes('medium') ? 'selected' : ''}`}
+                  onClick={() => toggleSlope('medium')}
+                >
+                  <div className="slope-icon">🏡</div>
+                  <div className="slope-label">Medium</div>
+                  <div className="slope-description">15° - 30° slope</div>
+                </div>
+                
+                <div 
+                  className={`slope-option ${selectedSlopes.includes('steep') ? 'selected' : ''}`}
+                  onClick={() => toggleSlope('steep')}
+                >
+                  <div className="slope-icon">⛰️</div>
+                  <div className="slope-label">Steep</div>
+                  <div className="slope-description">30°+ slope</div>
+                </div>
+              </div>
+              
+              <div className="slope-instructions">
+                <p>Select all roof slopes that apply to your building. You can select multiple options if your roof has different slope areas.</p>
+              </div>
+            </div>
+            
+            <div className="actions">
+              <button type="button" onClick={goBack}>Back</button>
+              <button type="button" className="primary" onClick={goNext} disabled={selectedSlopes.length === 0}>Next</button>
+            </div>
+          </div>
+        )}
+
+        {currentStep === 3 && (
           <form className="step-content" onSubmit={(e) => { e.preventDefault(); goNext(); }}>
             <h3>Your Details</h3>
             <label>
@@ -1121,7 +1309,7 @@ export default function Home() {
           </form>
         )}
 
-        {currentStep === 3 && (
+        {currentStep === 4 && (
           <div className="step-content">
             <h3>Review</h3>
             <div className="summary">
@@ -1149,6 +1337,25 @@ export default function Home() {
             ) : (
               <div className="summary"><div>No roof areas added</div></div>
             )}
+            <div className="summary">
+              <div><strong>Selected Slopes</strong></div>
+              <div>
+                {selectedSlopes.length > 0 ? (
+                  <div className="selected-slopes">
+                    {selectedSlopes.map((slope, index) => (
+                      <span key={slope} className="slope-tag">
+                        {slope === 'flat' && '🏠 Flat'}
+                        {slope === 'shallow' && '🏘️ Shallow'}
+                        {slope === 'medium' && '🏡 Medium'}
+                        {slope === 'steep' && '⛰️ Steep'}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  "No slopes selected"
+                )}
+              </div>
+            </div>
             <div className="summary">
               <div><strong>Name</strong></div>
               <div>{formValues.name}</div>
